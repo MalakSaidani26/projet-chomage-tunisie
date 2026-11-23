@@ -1,0 +1,422 @@
+---
+title: "Prédiction du nombre de chômeurs en Tunisie à partir d’indicateurs macroéconomiques"
+author: "Malak Saidani"
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    number_sections: true
+    toc: true
+    toc_depth: 3
+header-includes:
+  - \usepackage{hyperref}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+\newpage
+
+\section{Contexte et objectifs}
+
+Le nombre de chômeurs en Tunisie reste un enjeu majeur pour l'économie et la société du pays. Comprendre l'impact des facteurs macroéconomiques sur l'emploi est au cœur des préoccupations des décideurs politiques et des économistes.
+
+L'objectif de cette étude est de tester si des modèles de machine learning peuvent prédire le nombre de chômeurs en Tunisie à partir d'indicateurs macroéconomiques. **Il s'agit d'une étude exploratoire** : les données disponibles sont très limitées (voir sections \ref{sec:controles} et \ref{sec:conclusion}).
+
+\subsection{Problématique}
+
+Comment les facteurs macroéconomiques influencent-ils le nombre de chômeurs en Tunisie, et dans quelle mesure permettent-ils de le prédire ?
+
+\subsection{Objectifs}
+
+\subsubsection{Objectif principal}
+Comparer plusieurs modèles de machine learning pour prédire le nombre total de chômeurs en Tunisie, mesuré trimestriellement, à partir d’indicateurs macroéconomiques annuels (PIB, inflation, dette, paiements d’intérêts).
+
+\subsubsection{Objectifs spécifiques}
+
+\begin{itemize}
+\item Importer et nettoyer les indicateurs de l'INS contenus dans \texttt{data.csv}.
+\item Extraire les indicateurs macroéconomiques du rapport \textit{Données économiques Tunisie} (PDF).
+\item Réaliser une analyse exploratoire avant la modélisation.
+\item Comparer une régression linéaire, un Random Forest et un kNN à une prévision de référence (moyenne).
+\end{itemize}
+
+\section{Spécification des variables}
+
+\subsection{Variable cible (Y)}
+
+\begin{itemize}
+\item \textbf{Nombre de chômeurs} (\texttt{Valeur} lorsque \texttt{Indicateur = "Nombre de chômeurs"} et \texttt{Sexe} manquant) : nombre total de personnes au chômage.
+\end{itemize}
+
+\subsection{Variables explicatives macroéconomiques (X)}
+
+\begin{itemize}
+\item \textbf{Croissance du PIB réel} (\texttt{PIB}) : aux prix du marché constants, en \%.
+\item \textbf{Inflation} (\texttt{Inflation}) : indice des prix à la consommation, en \%.
+\item \textbf{Dette publique} (\texttt{Dette\_publique\_pctPIB}) : en \% du PIB.
+\item \textbf{Paiements d'intérêts} (\texttt{Paiements\_interets\_pctPIB}) : en \% du PIB.
+\item \textbf{Ratio intérêts/dette} (\texttt{Ratio\_interets\_dette}) : variable dérivée :
+\[
+Ratio\_interets\_dette = \frac{\text{Paiements d'intérêts}_{\%\text{PIB}}}{\text{Dette publique}_{\%\text{PIB}}} \times 100
+\]
+Il s'agit du coût apparent de la dette publique. Ce n'est \textbf{pas} un taux d'intérêt réel au sens macroéconomique (taux nominal $-$ inflation).
+\end{itemize}
+
+\subsection{Variables temporelles}
+
+\begin{itemize}
+\item \textbf{Période} : trimestre au format \texttt{"Tn AAAA"} (ex. \texttt{"T2 2023"}).
+\item \textbf{Année} : extraite de la période, utilisée pour joindre les données macro annuelles.
+\end{itemize}
+
+\section{Collecte des données}
+
+\subsection{Sources}
+
+\begin{itemize}
+\item \textbf{INS (Institut National de la Statistique, Tunisie)} : indicateurs trimestriels emploi/chômage, dans \texttt{data/data.csv}. Certaines lignes (ex. nombre de retraités 2024) sont des estimations ou projections signalées dans la colonne \texttt{Remarques supplémentaires}.
+\item \textbf{Banque mondiale} : tableau 1 du PDF \textit{Données économiques Tunisie}. Les valeurs de 2024 et 2025 sont des \textbf{projections}, non des valeurs observées.
+\end{itemize}
+
+\subsection{Chargement des bibliothèques}
+
+Le package \texttt{readr} importe le CSV, \texttt{dplyr} et \texttt{stringr} servent au nettoyage, \texttt{ggplot2} aux graphiques, \texttt{pdftools} à l'extraction du PDF, \texttt{caret} à l'entraînement et à l'évaluation des modèles (avec \texttt{randomForest}), et \texttt{kableExtra} à la mise en forme des tableaux.
+
+```{r packages}
+library(readr)
+library(dplyr)
+library(stringr)
+library(ggplot2)
+library(pdftools)
+library(caret)
+library(randomForest)
+library(kableExtra)
+```
+
+\subsection{Importation des données}
+
+\subsubsection{Fichier CSV}
+
+Les chemins sont **relatifs** à l'emplacement de ce fichier \texttt{.Rmd} (racine du dépôt).
+
+```{r import-csv}
+chemin_csv <- "data/data.csv"
+stopifnot(file.exists(chemin_csv))
+
+data <- read_csv(chemin_csv, show_col_types = FALSE) %>%
+  rename(Categorie = `Catégorie`, Periode = `Période`)
+
+knitr::kable(head(data, 25),
+             caption = "Contenu de data.csv (25 premières lignes).",
+             booktabs = TRUE) %>%
+  kable_styling(font_size = 7, latex_options = c("scale_down", "hold_position"))
+```
+
+\subsubsection{Fichier PDF}
+
+Le PDF utilise le tiret demi-cadratin (« – ») pour les nombres négatifs. Il est converti en signe moins avant l'extraction des nombres, ce qui évite toute correction manuelle des valeurs.
+
+```{r import-pdf}
+chemin_pdf <- "data/donnees_economiques_tunisie.pdf"
+stopifnot(file.exists(chemin_pdf))
+
+txt <- pdf_text(chemin_pdf)
+lignes <- unlist(strsplit(paste(txt, collapse = "\n"), "\n"))
+lignes <- str_squish(lignes)
+lignes <- lignes[nzchar(lignes)]
+lignes <- str_replace_all(lignes, "[\u2013\u2212]", "-")  # tirets typographiques -> "-"
+
+# Ligne d'en-tête des années (2020 ... 2025)
+ligne_annees <- lignes[grepl("^(20[0-9]{2} ){5}20[0-9]{2}$", lignes)]
+if (length(ligne_annees) == 0) {
+  ligne_annees <- lignes[grepl("2020", lignes) & grepl("2025", lignes)]
+}
+
+ligne_pib     <- lignes[grepl("^Croissance du PIB", lignes) & grepl("march", lignes)]
+ligne_infl    <- lignes[grepl("^Inflation", lignes) & grepl("prix", lignes)]
+ligne_dette   <- lignes[grepl("^Dette publique", lignes) & grepl("PIB", lignes)]
+ligne_interet <- lignes[grepl("^Paiements", lignes) & grepl("dette publique", lignes)]
+
+stopifnot(length(ligne_annees) >= 1, length(ligne_pib) >= 1, length(ligne_infl) >= 1,
+          length(ligne_dette) >= 1, length(ligne_interet) >= 1)
+
+extraire_nombres <- function(texte) {
+  nums <- str_extract_all(texte[1], "-?[0-9]+,[0-9]+|-?[0-9]+\\.[0-9]+|-?[0-9]+")[[1]]
+  as.numeric(str_replace_all(nums, ",", "."))
+}
+
+annees   <- as.numeric(str_extract_all(ligne_annees[1], "20[0-9]{2}")[[1]])
+pib      <- extraire_nombres(ligne_pib)
+infl     <- extraire_nombres(ligne_infl)
+dette    <- extraire_nombres(ligne_dette)
+interets <- extraire_nombres(ligne_interet)
+
+# Contrôle : chaque série doit avoir une valeur par année
+stopifnot(length(pib) == length(annees), length(infl) == length(annees),
+          length(dette) == length(annees), length(interets) == length(annees))
+
+macro <- data.frame(
+  Annee = annees,
+  PIB = pib,
+  Inflation = infl,
+  Dette_publique_pctPIB = dette,
+  Paiements_interets_pctPIB = interets
+) %>%
+  mutate(Ratio_interets_dette = Paiements_interets_pctPIB / Dette_publique_pctPIB * 100)
+
+knitr::kable(macro, digits = 3, booktabs = TRUE,
+             caption = "Variables macroéconomiques extraites du tableau 1 du PDF (2024-2025 : projections).") %>%
+  kable_styling(font_size = 8, latex_options = c("scale_down", "hold_position"))
+```
+
+\section{Prétraitement des données}
+
+Les variables macroéconomiques étant annuelles, leurs valeurs sont répétées pour chaque trimestre de la même année lors de la fusion.
+
+\subsection{Nettoyage des libellés et valeurs manquantes}
+
+```{r nettoyage}
+data_clean <- data %>%
+  mutate(
+    Indicateur = str_squish(Indicateur),
+    Indicateur = str_replace_all(Indicateur, "Taux de chômage des jeunes?$", "Taux de chômage des jeunes")
+  ) %>%
+  filter(!is.na(Valeur))
+
+sum(is.na(data_clean$Valeur))
+```
+
+\subsection{Création des variables temporelles}
+
+```{r temps}
+data_clean <- data_clean %>%
+  mutate(
+    Periode   = str_squish(Periode),
+    Trim      = as.numeric(str_extract(Periode, "(?<=T)\\d")),
+    Annee     = as.numeric(str_extract(Periode, "\\d{4}")),
+    Date_trim = as.Date(paste0(Annee, "-", (Trim - 1) * 3 + 1, "-01"))
+  )
+```
+
+\subsection{Variable cible (nombre total de chômeurs)}
+
+```{r cible}
+y <- data_clean %>%
+  filter(Indicateur == "Nombre de chômeurs", is.na(Sexe)) %>%
+  select(Periode, Date_trim, Annee, Valeur) %>%
+  arrange(Date_trim)
+
+y
+```
+
+\subsection{Fusion des sources}
+
+```{r fusion}
+base_ml <- y %>%
+  left_join(macro, by = "Annee") %>%
+  filter(!is.na(PIB), !is.na(Inflation), !is.na(Ratio_interets_dette))
+```
+
+\subsection{Contrôles de cohérence}\label{sec:controles}
+
+```{r controles}
+cat("Nombre d'observations      :", nrow(base_ml), "\n")
+cat("Années distinctes (valeurs macro distinctes) :", n_distinct(base_ml$Annee), "\n")
+cat("Doublons de période        :", any(duplicated(base_ml$Periode)), "\n")
+summary(base_ml)
+```
+
+**Point d'attention.** La base ne compte que quelques trimestres, et comme les indicateurs macro sont annuels, ils ne prennent que quelques valeurs distinctes (une par année). Cela limite fortement ce qu'un modèle peut apprendre : les résultats de la section \ref{sec:resultats} sont à interpréter avec la plus grande prudence.
+
+\section{Analyse exploratoire}
+
+\subsection{Statistiques descriptives}
+
+```{r descriptives}
+vars_num <- c("Valeur", "PIB", "Inflation", "Dette_publique_pctPIB",
+              "Paiements_interets_pctPIB", "Ratio_interets_dette")
+summary(base_ml[, vars_num])
+```
+
+\subsection{Corrélations}
+
+```{r correlations}
+vars_cor <- c("Valeur", "PIB", "Inflation", "Ratio_interets_dette")
+round(cor(base_ml[, vars_cor], use = "complete.obs"), 3)
+```
+
+Lorsque les variables macro ne prennent que deux valeurs distinctes, leurs corrélations mutuelles valent $\pm 1$ : elles portent alors la même information et ne peuvent pas être utilisées ensemble dans une régression.
+
+\subsection{Graphiques}
+
+```{r graph-temps}
+ggplot(base_ml, aes(x = Date_trim, y = Valeur)) +
+  geom_line(color = "steelblue") +
+  geom_point(color = "firebrick", size = 2) +
+  labs(title = "Évolution du nombre de chômeurs (total)",
+       x = "Trimestre", y = "Nombre de chômeurs") +
+  theme_minimal()
+```
+
+```{r graph-pib}
+ggplot(base_ml, aes(x = PIB, y = Valeur, color = factor(Annee))) +
+  geom_point(size = 3) +
+  labs(title = "Nombre de chômeurs vs croissance du PIB réel",
+       x = "Croissance du PIB réel (%)", y = "Nombre de chômeurs", color = "Année") +
+  theme_minimal()
+```
+
+```{r graph-inflation}
+ggplot(base_ml, aes(x = Inflation, y = Valeur, color = factor(Annee))) +
+  geom_point(size = 3) +
+  labs(title = "Nombre de chômeurs vs inflation",
+       x = "Inflation (%)", y = "Nombre de chômeurs", color = "Année") +
+  theme_minimal()
+```
+
+```{r graph-ratio}
+ggplot(base_ml, aes(x = Ratio_interets_dette, y = Valeur, color = factor(Annee))) +
+  geom_point(size = 3) +
+  labs(title = "Nombre de chômeurs vs ratio intérêts/dette",
+       x = "Ratio intérêts/dette (%)", y = "Nombre de chômeurs", color = "Année") +
+  theme_minimal()
+```
+
+Les droites de régression ne sont volontairement pas tracées : avec si peu de valeurs distinctes en abscisse, elles donneraient une impression trompeuse de tendance.
+
+\section{Modèles de machine learning}
+
+Trois modèles sont comparés à une prévision de référence (la moyenne des autres observations) :
+
+\begin{itemize}
+\item Régression linéaire ;
+\item Random Forest ;
+\item k-Nearest Neighbors (kNN), avec centrage et réduction des variables.
+\end{itemize}
+
+\subsection{Choix des prédicteurs}
+
+Les prédicteurs sans variance sont écartés, puis les prédicteurs fortement corrélés entre eux ($|r| \geq 0{,}9$) sont éliminés un à un, afin d'éviter une matrice singulière dans la régression. Cette règle s'adapte automatiquement si des données plus riches sont ajoutées.
+
+```{r predicteurs}
+base_ml <- base_ml %>% arrange(Date_trim)
+candidats <- c("PIB", "Inflation", "Ratio_interets_dette")
+
+# 1) variance non nulle
+candidats <- candidats[sapply(candidats, function(v) sd(base_ml[[v]]) > 0)]
+
+# 2) suppression des prédicteurs redondants (|r| >= 0.9 avec un prédicteur déjà retenu)
+retenus <- character(0)
+for (v in candidats) {
+  if (length(retenus) == 0 ||
+      all(abs(cor(base_ml[[v]], as.matrix(base_ml[, retenus, drop = FALSE]))) < 0.9)) {
+    retenus <- c(retenus, v)
+  }
+}
+stopifnot(length(retenus) >= 1)
+cat("Prédicteurs retenus :", paste(retenus, collapse = ", "), "\n")
+
+formule <- as.formula(paste("Valeur ~", paste(retenus, collapse = " + ")))
+formule
+```
+
+\subsection{Schéma de validation}
+
+Avec si peu d'observations, un découpage entraînement/test fixe n'est pas exploitable (l'entraînement pourrait ne contenir qu'une seule année, donc des prédicteurs constants). Une validation croisée **leave-one-out** (LOOCV) est utilisée : chaque trimestre est prédit par un modèle entraîné sur les autres. Cette méthode ne respecte pas l'ordre chronologique : elle ne mesure donc pas une capacité de prévision future.
+
+```{r validation}
+set.seed(123)
+ctrl <- trainControl(method = "LOOCV", savePredictions = "final")
+
+rmse <- function(y, yhat) sqrt(mean((y - yhat)^2))
+mae  <- function(y, yhat) mean(abs(y - yhat))
+pred_loo <- function(m) { p <- m$pred; p$pred[order(p$rowIndex)] }
+
+y_obs <- base_ml$Valeur
+pred_ref <- sapply(seq_along(y_obs), function(i) mean(y_obs[-i]))
+```
+
+\subsection{Modèle 1 : régression linéaire}
+
+```{r lm}
+modele_lm <- train(formule, data = base_ml, method = "lm", trControl = ctrl)
+```
+
+\subsection{Modèle 2 : Random Forest}
+
+```{r rf}
+modele_rf <- train(formule, data = base_ml, method = "rf", trControl = ctrl,
+                   tuneGrid = data.frame(mtry = length(retenus)))
+```
+
+\subsection{Modèle 3 : kNN}
+
+```{r knn}
+modele_knn <- train(formule, data = base_ml, method = "knn", trControl = ctrl,
+                    preProcess = c("center", "scale"),
+                    tuneGrid = data.frame(k = 3))
+```
+
+\section{Résultats}\label{sec:resultats}
+
+```{r resultats}
+pred_lm  <- pred_loo(modele_lm)
+pred_rf  <- pred_loo(modele_rf)
+pred_knn <- pred_loo(modele_knn)
+
+resultats <- data.frame(
+  Modele = c("Référence (moyenne)", "Régression linéaire", "Random Forest", "kNN"),
+  RMSE = c(rmse(y_obs, pred_ref), rmse(y_obs, pred_lm),
+           rmse(y_obs, pred_rf),  rmse(y_obs, pred_knn)),
+  MAE  = c(mae(y_obs, pred_ref), mae(y_obs, pred_lm),
+           mae(y_obs, pred_rf),  mae(y_obs, pred_knn))
+)
+
+knitr::kable(resultats, digits = 0, booktabs = TRUE,
+             caption = "Erreurs de prédiction en validation leave-one-out.") %>%
+  kable_styling(latex_options = "hold_position")
+```
+
+```{r graph-resultats}
+comparaison <- rbind(
+  data.frame(Modele = "Référence (moyenne)", Observe = y_obs, Predit = pred_ref),
+  data.frame(Modele = "Régression linéaire", Observe = y_obs, Predit = pred_lm),
+  data.frame(Modele = "Random Forest",       Observe = y_obs, Predit = pred_rf),
+  data.frame(Modele = "kNN",                 Observe = y_obs, Predit = pred_knn)
+)
+
+ggplot(comparaison, aes(x = Observe, y = Predit)) +
+  geom_point(color = "darkgreen", size = 2) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "red") +
+  facet_wrap(~ Modele) +
+  labs(title = "Observé vs prédit (leave-one-out)",
+       x = "Nombre de chômeurs observé", y = "Nombre de chômeurs prédit") +
+  theme_minimal()
+```
+
+\textbf{Lecture.} Un modèle n'apporte une information que si ses erreurs (RMSE, MAE) sont nettement inférieures à celles de la prévision de référence. Dans le cas contraire, il ne fait pas mieux que prédire la moyenne.
+
+\section{Conclusion et perspectives}\label{sec:conclusion}
+
+Cette étude met en place une chaîne complète : importation du CSV de l'INS, extraction des indicateurs macroéconomiques depuis le PDF, fusion, analyse exploratoire et comparaison de trois modèles avec une référence naïve.
+
+\textbf{Limites principales.}
+
+\begin{itemize}
+\item La variable cible n'est disponible que sur quelques trimestres (2022 à T2 2023), ce qui est insuffisant pour estimer de façon fiable un modèle de machine learning.
+\item Les indicateurs macroéconomiques sont annuels : ils ne varient pas d'un trimestre à l'autre au sein d'une même année, et sont ici parfaitement redondants entre eux.
+\item Les valeurs macro de 2024-2025 sont des projections.
+\item La validation leave-one-out ne mesure pas une capacité de prévision dans le temps, et la corrélation observée n'est pas une causalité.
+\end{itemize}
+
+Aucune conclusion économique ne peut donc être tirée de ces résultats.
+
+\textbf{Perspectives.}
+
+\begin{itemize}
+\item Compléter \texttt{data.csv} avec les séries trimestrielles de l'INS sur une période beaucoup plus longue (le code s'adapte automatiquement : sélection des prédicteurs, validation).
+\item Prédire le \textbf{taux de chômage} (comme dans la problématique initiale) plutôt que le nombre brut, moins sensible à la croissance de la population.
+\item Utiliser des variables explicatives trimestrielles ou mensuelles, un taux d'intérêt réel (taux nominal $-$ inflation) et d'autres variables de l'INS (population active, occupés, secteurs).
+\item Adopter une validation adaptée aux séries temporelles (\texttt{trainControl(method = "timeslice")}), des modèles régularisés (Ridge, Lasso) ou ARIMA/ARIMAX.
+\end{itemize}

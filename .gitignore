@@ -1,0 +1,14 @@
+# Fichiers de session RStudio / R
+.Rproj.user/
+.Rhistory
+.RData
+.Ruserdata
+.DS_Store
+
+# Fichiers intermédiaires de knitting
+*_cache/
+*_files/
+*.aux
+*.log
+*.tex
+*.toc
