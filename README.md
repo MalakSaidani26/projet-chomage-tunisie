@@ -1,8 +1,4 @@
----
-output:
-  pdf_document: default
-  html_document: default
----
+
 # Prédiction du nombre de chômeurs en Tunisie (R)
 
 Projet R de machine learning visant à prédire le **nombre total de chômeurs en Tunisie** (données trimestrielles INS) à partir d'indicateurs macroéconomiques annuels (PIB, inflation, dette publique, paiements d'intérêts).
